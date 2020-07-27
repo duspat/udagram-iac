@@ -1,0 +1,221 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Template to provision application autoscaling group, load balancer, and related resources
+
+Parameters:
+  EnvNameParam:
+    Description: 'Current Environment'
+    Type: 'String'
+    AllowedPattern: '[a-zA-Z0-9\-_]+'
+    Default: 'dev'
+
+  AppNameParam:
+    Description: 'Web app name'
+    Type: 'String'
+    AllowedPattern: '[a-zA-Z0-9\-_]+'
+    Default: 'webApp'
+
+  VPCIdParam:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: 'Vpc id'
+
+  WepAppPrivateSubnetIdsParam:
+    Description: 'Associated subnet ids'
+    Type: 'CommaDelimitedList'
+
+  PublicSubnetIdsParam:
+    Description: 'Associated subnet ids'
+    Type: 'CommaDelimitedList'
+
+  ImageIdParam:
+    Description: 'Id of AWS image used to run the app server- Ubuntu linux'
+    Type: 'String'
+    Default: 'ami-00f6a0c18edb19300'
+
+  InstanceTypeParam:
+    Description: 'AWS instance type'
+    Type: 'String'
+    Default: 't3.medium'
+
+  MaxSizeParam:
+    Description: 'Max number of instances running at a time'
+    Type: 'String'
+    Default: '4'
+
+  MinSizeParam:
+    Description: 'Min number of instances running at a time'
+    Type: 'String'
+    Default: '4'
+
+  KeyPairNameParam:
+    Description: 'Key for ssh access'
+    Type: 'String'
+    Default: ''
+
+Conditions:
+  UseSSHKey: !Not [!Equals [!Ref KeyPairNameParam, '']]
+
+Resources:
+  WebAppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'A security group for the ${AWS::StackName} http access'
+      GroupName: !Sub '${AWS::StackName}-http'
+      SecurityGroupEgress:
+        - CidrIp: '0.0.0.0/0'
+          FromPort: 0
+          ToPort: 0
+          IpProtocol: -1
+      SecurityGroupIngress:
+        - CidrIp: '0.0.0.0/0'
+          FromPort: 80
+          IpProtocol: 'tcp'
+          ToPort: 80
+      Tags:
+        - Key: 'env'
+          Value: !Ref EnvNameParam
+      VpcId: !Ref VPCIdParam
+
+  WebAppSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt WebAppSecurityGroup.GroupId
+      FromPort: 22
+      ToPort: 22
+      IpProtocol: 'tcp'
+      SourceSecurityGroupId: !GetAtt WebAppSecurityGroup.GroupId
+
+  WebAppLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${AppNameParam}-LB'
+      SecurityGroups:
+        - !GetAtt WebAppSecurityGroup.GroupId
+      Subnets: !Ref PublicSubnetIdsParam
+      Tags:
+        - Key: Env
+          Value: !Ref EnvNameParam
+      Type: application
+
+  WebAppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckPort: traffic-port
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      Matcher:
+        HttpCode: 200-399
+      Name: !Sub '${AppNameParam}-TG'
+      Port: 80
+      Protocol: HTTP
+      Tags:
+        - Key: Env
+          Value: !Ref EnvNameParam
+      TargetType: instance
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref VPCIdParam
+
+  WebAppLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: WebAppTargetGroup
+      LoadBalancerArn:
+        Ref: WebAppLoadBalancer
+      Port: '80'
+      Protocol: HTTP
+
+  WebAppLoadBalancerListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref WebAppTargetGroup
+      Conditions:
+        - Field: path-pattern
+          Values: [/]
+      ListenerArn: !Ref WebAppLoadBalancerListener
+      Priority: 1
+
+
+  WebAppAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub "${AppNameParam}-ASG"
+      LaunchConfigurationName: !Ref WebAppLaunchConfig
+      MaxSize: !Ref MaxSizeParam
+      MinSize: !Ref MinSizeParam
+      TargetGroupARNs:
+        - !Ref WebAppTargetGroup
+      VPCZoneIdentifier: !Ref WepAppPrivateSubnetIdsParam
+
+  WebAppLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: '10'
+      IamInstanceProfile: !Ref WebServerInstanceProfile
+      ImageId: !Ref ImageIdParam
+      InstanceType: !Ref InstanceTypeParam
+      LaunchConfigurationName: !Sub "${AppNameParam}-LC"
+      KeyName:
+        !If
+        - UseSSHKey
+        - !Ref KeyPairNameParam
+        - !Ref AWS::NoValue
+      SecurityGroups:
+        - !Ref WebAppSecurityGroup
+      UserData:
+        Fn::Base64:
+          !Sub |
+          #!/bin/bash -x
+          apt-get update -y
+          apt-get install unzip awscli -y
+          apt-get install apache2 -y
+          systemctl start apache2.service
+          cd /var/www/html
+          aws s3 cp s3://udacity-demo-1/udacity.zip .
+          unzip -o udacity.zip
+
+  WebAppS3ReadOnlyEC2:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 's3:GetObject'
+                Resource: 'arn:aws:s3:::udacity-demo-1/*'
+
+  WebServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref WebAppS3ReadOnlyEC2
+
+Outputs:
+  LoadBalancerEndpoint:
+    Value: !Sub "http://${WebAppLoadBalancer.DNSName}"
+
+  WebAppSecurityGroup:
+    Value: !GetAtt WebAppSecurityGroup.GroupId

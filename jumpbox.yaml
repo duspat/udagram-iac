@@ -1,0 +1,93 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: >-
+  Template for deploying jumpbox service
+
+Parameters:
+  EnvName:
+    Description: 'Current Environment'
+    Type: 'String'
+    AllowedPattern: '[a-zA-Z0-9\-_]+'
+    Default: 'dev'
+
+  VPCIdParam:
+    Description: 'Vpc id'
+    Type: 'AWS::EC2::VPC::Id'
+
+  SubnetIdParam:
+    Description: 'Associated subnet ids'
+    Type: 'AWS::EC2::Subnet::Id'
+
+  InstanceTypeParam:
+    Description: 'AWS instance type'
+    Type: 'String'
+    Default: 't2.micro'
+
+  AmiIdParam:
+    Description: 'AMI Image Id - Ubuntu linux'
+    Type: 'String'
+    Default: 'ami-00f6a0c18edb19300'
+
+  KeyPairNameParam:
+    Description: 'SSH key name'
+    Type: 'String'
+    Default: 'env-debug-key'
+
+  IngressCIDRParam:
+    Description: 'Ingress CIDR block'
+    Type: 'String'
+
+  WebAppSecurityGroupParam:
+    Description: 'Security group related to web servers used to grant ssh access'
+    Type: 'String'
+
+
+Resources:
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiIdParam
+      InstanceType: !Ref InstanceTypeParam
+      KeyName: !Ref KeyPairNameParam
+      SecurityGroupIds:
+        - !GetAtt SSHSecurityGroup.GroupId
+        - !Ref WebAppSecurityGroupParam
+      SubnetId: !Ref SubnetIdParam
+      UserData:
+        Fn::Base64:
+          !Sub |
+          #!/bin/bash -x
+          apt-get update
+          apt-get install -y curl
+          EC2_REGION=${AWS::Region}
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${EnvName}-jumpbox'
+        - Key: 'Env'
+          Value: !Ref EnvName
+
+  SSHSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'A security group for the ${AWS::StackName} ssh access'
+      GroupName: !Sub '${AWS::StackName}-ssh'
+      SecurityGroupEgress:
+        - CidrIp: '0.0.0.0/0'
+          FromPort: 0
+          IpProtocol: -1
+          ToPort: 0
+      SecurityGroupIngress:
+        - CidrIp: !Ref IngressCIDRParam
+          FromPort: 22
+          ToPort: 22
+          IpProtocol: 'tcp'
+      Tags:
+        - Key: 'env'
+          Value: !Ref EnvName
+      VpcId: !Ref VPCIdParam
+
+
+Outputs:
+  PublicDNS:
+    Value: !GetAtt EC2Instance.PublicDnsName

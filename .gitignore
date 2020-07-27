@@ -1,0 +1,5 @@
+.build
+*.env
+!*.env.dist
+.idea/
+.aws-sam/
